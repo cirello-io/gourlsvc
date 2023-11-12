@@ -57,6 +57,11 @@ func (s *server) registerRoutes() {
 	s.router.HandleFunc("/", s.root)
 }
 
+type Link struct {
+	Name string
+	URL  string
+}
+
 func (s *server) edit(w http.ResponseWriter, r *http.Request) {
 	urlParts := strings.Split(strings.TrimPrefix(r.URL.EscapedPath(), "/edit/"), "/")
 	if len(urlParts) == 0 {
@@ -65,12 +70,11 @@ func (s *server) edit(w http.ResponseWriter, r *http.Request) {
 	}
 	var (
 		requestName = urlParts[0]
-		name        string
-		url         string
+		link        Link
 	)
 	row := s.db.QueryRowContext(r.Context(), "SELECT name, url FROM links WHERE name = $1", requestName)
-	if err := row.Scan(&name, &url); err == sql.ErrNoRows {
-		name = requestName
+	if err := row.Scan(&link.Name, &link.URL); err == sql.ErrNoRows {
+		link.Name = requestName
 	} else if err != nil && err != sql.ErrNoRows {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -95,14 +99,13 @@ func (s *server) edit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var readOnly string
-	if name != "" {
+	if link.Name != "" {
 		readOnly = "readonly"
 	}
 	editForm.Execute(w, struct {
 		ReadOnly string
-		Name     string
-		URL      string
-	}{readOnly, name, url})
+		Link     Link
+	}{readOnly, link})
 }
 
 func (s *server) root(w http.ResponseWriter, r *http.Request) {
@@ -121,12 +124,9 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	type link struct {
-		Name, URL string
-	}
-	var links []link
+	var links []Link
 	for rows.Next() {
-		var link link
+		var link Link
 		if err := rows.Scan(&link.Name, &link.URL); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -203,8 +203,8 @@ var editForm = template.Must(template.New("editForm").Parse(`<!doctype html>
 </head>
 <body>
 <form method="POST">
-name:<input type="text" size="50" name="name" {{ .ReadOnly }} value="{{- .Name -}}"/><br/>
-url:<input type="text" size="120" name="url" value="{{- .URL -}}"/><br/>
+name:<input type="text" size="50" name="name" {{ .ReadOnly }} value="{{- .Link.Name -}}"/><br/>
+url:<input type="text" size="120" name="url" value="{{- .Link.URL -}}"/><br/>
 <input type="submit"/>
 </form>
 </body>
