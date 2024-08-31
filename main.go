@@ -332,6 +332,9 @@ var listLinks = template.Must(template.New("listLinks").Parse(`<!doctype html>
 {{ end }}
 	</tbody>
 </table>
+
+<p>edit global links:<pre>http://go/edit/$ALIAS</pre></p>
+<p>edit user links:<pre>http://go/editUser/$USER/$ALIAS</pre></p>
 </body>
 </html>`))
 
