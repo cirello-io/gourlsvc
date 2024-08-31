@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/netip"
 	"path"
 	"strings"
 
@@ -36,11 +37,15 @@ func migrate(db *sql.DB) error {
 	cmds := []string{
 		`CREATE TABLE IF NOT EXISTS links ( name varchar(255), url varchar(255) );`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS links_name ON links (name);`,
+		`CREATE TABLE IF NOT EXISTS user_links ( name varchar(255), url varchar(255), username varchar(255) );`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS user_links_name ON user_links (name, username);`,
+		`CREATE TABLE IF NOT EXISTS users ( username varchar(255), ip varchar(255), admin INTEGER );`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS users_unique ON user_links (username);`,
 	}
 	for i, cmd := range cmds {
 		_, err := db.Exec(cmd)
 		if err != nil {
-			return fmt.Errorf("cannot execute query %v: %w", i, err)
+			return fmt.Errorf("cannot execute migration query %v: %w", i+1, err)
 		}
 	}
 	return nil
@@ -53,13 +58,64 @@ type server struct {
 
 func (s *server) registerRoutes() {
 	s.router = http.NewServeMux()
+	s.router.HandleFunc("/editUser/", s.editUser)
 	s.router.HandleFunc("/edit/", s.edit)
 	s.router.HandleFunc("/", s.root)
 }
 
 type Link struct {
-	Name string
-	URL  string
+	Name     string
+	URL      string
+	Username string
+}
+
+func (s *server) editUser(w http.ResponseWriter, r *http.Request) {
+	urlParts := strings.Split(strings.TrimPrefix(r.URL.EscapedPath(), "/editUser/"), "/")
+	if len(urlParts) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	var (
+		username    = urlParts[0]
+		requestName = urlParts[1]
+		link        Link
+	)
+	row := s.db.QueryRowContext(r.Context(),
+		"SELECT name, url, username FROM user_links WHERE name = $1 AND username = $2",
+		requestName,
+		username)
+	if err := row.Scan(&link.Name, &link.URL, &link.Username); err == sql.ErrNoRows {
+		link.Name = requestName
+		link.Username = username
+	} else if err != nil && err != sql.ErrNoRows {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		name := r.FormValue("name")
+		url := r.FormValue("url")
+
+		_, err := s.db.Exec("INSERT OR REPLACE INTO user_links values ($1, $2, $3)", name, url, username)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	var readOnly string
+	if link.Name != "" {
+		readOnly = "readonly"
+	}
+	editForm.Execute(w, struct {
+		ReadOnly string
+		Link     Link
+	}{readOnly, link})
 }
 
 func (s *server) edit(w http.ResponseWriter, r *http.Request) {
@@ -118,30 +174,82 @@ func (s *server) root(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(), "SELECT name, url FROM links ORDER BY name")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
 	var links []Link
-	for rows.Next() {
-		var link Link
-		if err := rows.Scan(&link.Name, &link.URL); err != nil {
+	{
+		rows, err := s.db.QueryContext(r.Context(), "SELECT name, url FROM links ORDER BY name")
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		links = append(links, link)
+		defer rows.Close()
+		for rows.Next() {
+			var link Link
+			if err := rows.Scan(&link.Name, &link.URL); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			links = append(links, link)
+		}
+	}
+	{
+		rows, err := s.db.QueryContext(r.Context(), "SELECT name, url, username FROM user_links ORDER BY name")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var link Link
+			if err := rows.Scan(&link.Name, &link.URL, &link.Username); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			links = append(links, link)
+		}
 	}
 
 	listLinks.Execute(w, links)
 }
 
 func (s *server) redirect(w http.ResponseWriter, r *http.Request) {
+	var username string
+	addrport, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err == nil && addrport.Addr().Is4() {
+		err := s.db.QueryRowContext(r.Context(), `
+			SELECT
+				username
+			FROM
+				users
+			WHERE
+				ip = $1
+		`, addrport.Addr().String()).Scan(&username)
+		if err != nil && err != sql.ErrNoRows {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	{
 		name := strings.TrimPrefix(r.URL.EscapedPath(), "/")
 		var url string
-		row := s.db.QueryRowContext(r.Context(), "SELECT url FROM links WHERE name = $1", name)
+		row := s.db.QueryRowContext(r.Context(), `
+			(
+				SELECT
+					url
+				FROM
+					user_links
+				WHERE
+					name = $1
+					AND username = $2
+			) UNION ALL (
+				SELECT
+					url
+				FROM
+					links
+				WHERE
+					name = $1
+			)
+			LIMIT 1
+		`, name)
 		if err := row.Scan(&url); err == nil && url != "" {
 			http.Redirect(w, r, url, http.StatusSeeOther)
 			return
@@ -156,7 +264,24 @@ func (s *server) redirect(w http.ResponseWriter, r *http.Request) {
 		name := urlParts[1]
 		rest := path.Clean(strings.TrimPrefix(r.URL.EscapedPath(), "/"+name))
 		var url string
-		row := s.db.QueryRowContext(r.Context(), "SELECT url FROM links WHERE name = $1", name)
+		row := s.db.QueryRowContext(r.Context(), `
+			(
+				SELECT
+					url
+				FROM
+					user_links
+				WHERE
+					name = $1
+					AND username = $2
+			) UNION ALL (
+				SELECT
+					url
+				FROM
+					links
+				WHERE
+					name = $1
+			) LIMIT 1
+		`, name, username)
 		if err := row.Scan(&url); err == sql.ErrNoRows {
 			http.NotFound(w, r)
 			return
@@ -180,6 +305,7 @@ var listLinks = template.Must(template.New("listLinks").Parse(`<!doctype html>
 <table>
 	<thead>
 		<tr>
+			<th>Username</th>
 			<th>Name</th>
 			<th>URL</th>
 		</tr>
@@ -187,6 +313,7 @@ var listLinks = template.Must(template.New("listLinks").Parse(`<!doctype html>
 	<tbody>
 {{ range . }}
 	<tr>
+		<td>{{ .Username }}</th>
 		<td>{{ .Name }}</th>
 		<td><a href="{{ .URL }}">{{ .URL }}</a></th>
 	</tr>
@@ -205,6 +332,7 @@ var editForm = template.Must(template.New("editForm").Parse(`<!doctype html>
 <form method="POST">
 name:<input type="text" size="50" name="name" {{ .ReadOnly }} value="{{- .Link.Name -}}"/><br/>
 url:<input type="text" size="120" name="url" value="{{- .Link.URL -}}"/><br/>
+username:<input type="text" size="120" name="username" readonly value="{{- .Link.Username -}}"/><br/>
 <input type="submit"/>
 </form>
 </body>
