@@ -232,6 +232,9 @@ func (s *server) redirect(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.EscapedPath(), "/")
 		var url string
 		row := s.db.QueryRowContext(r.Context(), `
+			SELECT
+				url
+			FROM
 			(
 				SELECT
 					url
@@ -240,7 +243,7 @@ func (s *server) redirect(w http.ResponseWriter, r *http.Request) {
 				WHERE
 					name = $1
 					AND username = $2
-			) UNION ALL (
+				UNION ALL
 				SELECT
 					url
 				FROM
@@ -249,7 +252,7 @@ func (s *server) redirect(w http.ResponseWriter, r *http.Request) {
 					name = $1
 			)
 			LIMIT 1
-		`, name)
+		`, name, username)
 		if err := row.Scan(&url); err == nil && url != "" {
 			http.Redirect(w, r, url, http.StatusSeeOther)
 			return
@@ -265,6 +268,9 @@ func (s *server) redirect(w http.ResponseWriter, r *http.Request) {
 		rest := path.Clean(strings.TrimPrefix(r.URL.EscapedPath(), "/"+name))
 		var url string
 		row := s.db.QueryRowContext(r.Context(), `
+			SELECT
+				url
+			FROM
 			(
 				SELECT
 					url
@@ -273,14 +279,15 @@ func (s *server) redirect(w http.ResponseWriter, r *http.Request) {
 				WHERE
 					name = $1
 					AND username = $2
-			) UNION ALL (
+				UNION ALL
 				SELECT
 					url
 				FROM
 					links
 				WHERE
 					name = $1
-			) LIMIT 1
+			)
+			LIMIT 1
 		`, name, username)
 		if err := row.Scan(&url); err == sql.ErrNoRows {
 			http.NotFound(w, r)
