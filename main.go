@@ -212,9 +212,14 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) redirect(w http.ResponseWriter, r *http.Request) {
+	var remoteIP string
+	if xForwardedFor := r.Header.Get("X-Forwarded-For"); xForwardedFor != "" {
+		remoteIP = xForwardedFor
+	} else if addrport, err := netip.ParseAddrPort(r.RemoteAddr); err == nil && addrport.Addr().Is4() {
+		remoteIP = addrport.Addr().String()
+	}
 	var username string
-	addrport, err := netip.ParseAddrPort(r.RemoteAddr)
-	if err == nil && addrport.Addr().Is4() {
+	if remoteIP != "" {
 		err := s.db.QueryRowContext(r.Context(), `
 			SELECT
 				username
@@ -222,7 +227,7 @@ func (s *server) redirect(w http.ResponseWriter, r *http.Request) {
 				users
 			WHERE
 				ip = $1
-		`, addrport.Addr().String()).Scan(&username)
+		`, remoteIP).Scan(&username)
 		if err != nil && err != sql.ErrNoRows {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
