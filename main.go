@@ -11,13 +11,13 @@ import (
 	"path"
 	"strings"
 
-	_ "github.com/mattn/go-sqlite3" // SQLite3 driver
+	_ "modernc.org/sqlite" // SQLite3 driver
 )
 
 func main() {
 	log.SetPrefix("gourlsvc: ")
 	log.SetFlags(0)
-	db, err := sql.Open("sqlite3", "links.db")
+	db, err := sql.Open("sqlite", "links.db")
 	if err != nil {
 		log.Fatal(err)
 	}
